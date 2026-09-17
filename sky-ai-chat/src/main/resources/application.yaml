@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: sky-ai-chat
+  ai:
+    openai:
+      api-key: ${DASHSCOPE_API_KEY}
+      base-url: https://ws-in4j3efmx0r1wbth.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      chat:
+        model: qwen3.8-max
+      embedding:
+        model: text-embedding-v4
+  data:
+    redis:
+      port: 6379
+      host: localhost
+      database: 10
+
+server:
+  port: 9090
+
+logging:
+  level:
+    org:
+      springframework:
+        ai:
+          chat:
+            client:
+              advisor: debug
+
+
+
+
