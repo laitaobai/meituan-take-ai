@@ -1,11 +1,21 @@
 server:
-  port: 8080
+  port: 8888
 
 spring:
+  application:
+    name: sky-server
   profiles:
     active: dev
   main:
     allow-circular-references: true
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:123456}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
   datasource:
     druid:
       driver-class-name: ${sky.datasource.driver-class-name}
@@ -17,6 +27,20 @@ spring:
     port: ${sky.redis.port}
     password: ${sky.redis.password}
     database: ${sky.redis.database}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:admin}
+    password: ${RABBITMQ_PASSWORD:123456}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    listener:
+      simple:
+        # 手动确认，消费失败可重回队列，避免消息丢失
+        acknowledge-mode: manual
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 2000
 
 mybatis:
   #mapper配置文件

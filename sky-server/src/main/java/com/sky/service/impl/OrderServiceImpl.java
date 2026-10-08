@@ -13,10 +13,13 @@ import com.sky.exception.AddressBookBusinessException;
 import com.sky.exception.OrderBusinessException;
 import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.*;
+import com.sky.mq.OrderMessageProducer;
+import com.sky.mq.PaySuccessEvent;
 import com.sky.result.PageResult;
 import com.sky.service.OrderService;
 import com.sky.utils.HttpClientUtil;
 import com.sky.utils.WeChatPayUtil;
+import com.sky.vo.OrderCancelApplyVO;
 import com.sky.vo.OrderPaymentVO;
 import com.sky.vo.OrderStatisticsVO;
 import com.sky.vo.OrderSubmitVO;
@@ -27,8 +30,11 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.annotation.Order;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
@@ -37,11 +43,25 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class OrderServiceImpl implements OrderService {
+
+    /** 取消订单确认凭证在 Redis 中的前缀 */
+    private static final String CANCEL_CONFIRM_KEY = "sky:order:cancel:confirm:";
+
+    /** 确认凭证有效期，单位分钟 */
+    private static final long CANCEL_CONFIRM_TTL_MINUTES = 5;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Autowired
+    private OrderMessageProducer orderMessageProducer;
 
     @Autowired
     private OrderMapper orderMapper;
@@ -135,7 +155,24 @@ public class OrderServiceImpl implements OrderService {
                 .orderTime(order.getOrderTime())
                 .build();
 
+//        下单本身不发消息，支付成功才是真正的业务事件
         return submitVO;
+    }
+
+    /**
+     * 事务提交成功后才发送消息，避免支付事务回滚但消息已投递出去
+     */
+    private void publishPaySuccess(PaySuccessEvent event) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    orderMessageProducer.sendPaySuccess(event);
+                }
+            });
+        } else {
+            orderMessageProducer.sendPaySuccess(event);
+        }
     }
 
     /**
@@ -173,7 +210,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * 支付成功，修改订单状态
+     * 支付成功：只投递消息，状态变更、来单提醒、支付通知全部由消费者异步完成，避免阻塞用户等待
      * @param outTradeNo
      */
     @Override
@@ -183,24 +220,17 @@ public class OrderServiceImpl implements OrderService {
 
 //        根据订单号查询当前用户的订单
         Orders orderDB = orderMapper.getByNumberAndUserId(outTradeNo, userId);
+        if (orderDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
 
-//        根据订单id更新订单的状态、支付方式、支付状态、结账时间
-        Orders orders = Orders.builder()
-                .id(orderDB.getId())
-                .status(Orders.TO_BE_CONFIRMED)
-                .payStatus(Orders.PAID)
-                .checkoutTime(LocalDateTime.now())
-                .build();
-        orderMapper.update(orders);
-
-        //        通过WebSocket实现来电提醒，向客户端浏览器推送消息
-        HashMap map = new HashMap();
-        map.put("type", 1);
-        map.put("orderId", orders.getId());
-        map.put("content", "订单号：" + outTradeNo);
-
-        webSocketServer.sendToAllClient(JSON.toJSONString(map));
-
+        publishPaySuccess(PaySuccessEvent.builder()
+                .orderId(orderDB.getId())
+                .orderNumber(orderDB.getNumber())
+                .userId(userId)
+                .amount(orderDB.getAmount())
+                .payTime(LocalDateTime.now())
+                .build());
     }
 
     /**
@@ -269,12 +299,19 @@ public class OrderServiceImpl implements OrderService {
      * @param id
      */
     @Override
+    @Transactional
     public void userCancelById(Long id) throws Exception {
 //        根据id查询订单
         Orders orderDB = orderMapper.getById(id);
 
 //        校验订单是否存在
         if (orderDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
+
+//        校验订单归属，防止取消他人订单
+        Long currentId = BaseContext.getCurrentId();
+        if (currentId != null && !currentId.equals(orderDB.getUserId())) {
             throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
         }
 
@@ -305,6 +342,123 @@ public class OrderServiceImpl implements OrderService {
         orders.setCancelReason("用户取消");
         orders.setCancelTime(LocalDateTime.now());
         orderMapper.update(orders);
+    }
+
+    /**
+     * 提交取消申请，只签发一次性确认凭证，不改动订单数据
+     * @param id 订单id
+     */
+    @Override
+    public OrderCancelApplyVO applyCancel(Long id) {
+        Long userId = BaseContext.getCurrentId();
+
+        Orders orderDB = orderMapper.getById(id);
+        if (orderDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
+        if (userId == null || !userId.equals(orderDB.getUserId())) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
+//      只有待付款(1)、待接单(2)可以申请取消
+        if (orderDB.getStatus() > Orders.TO_BE_CONFIRMED) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
+
+        String token = UUID.randomUUID().toString().replace("-", "");
+        stringRedisTemplate.opsForValue().set(
+                CANCEL_CONFIRM_KEY + token,
+                userId + ":" + orderDB.getId(),
+                CANCEL_CONFIRM_TTL_MINUTES,
+                TimeUnit.MINUTES);
+
+        return OrderCancelApplyVO.builder()
+                .confirmToken(token)
+                .orderId(orderDB.getId())
+                .orderNumber(orderDB.getNumber())
+                .amount(orderDB.getAmount())
+                .expireSeconds((int) TimeUnit.MINUTES.toSeconds(CANCEL_CONFIRM_TTL_MINUTES))
+                .build();
+    }
+
+    /**
+     * 用户本人确认后执行取消，凭证一次性生效
+     * @param token 一次性确认凭证
+     */
+    @Override
+    @Transactional
+    public void confirmCancel(String token) throws Exception {
+        if (token == null || token.isEmpty()) {
+            throw new OrderBusinessException(MessageConstant.CANCEL_CONFIRM_INVALID);
+        }
+        Long userId = BaseContext.getCurrentId();
+        String key = CANCEL_CONFIRM_KEY + token;
+        String value = stringRedisTemplate.opsForValue().get(key);
+        if (value == null) {
+            throw new OrderBusinessException(MessageConstant.CANCEL_CONFIRM_INVALID);
+        }
+
+        String[] parts = value.split(":");
+        if (parts.length != 2 || !Long.valueOf(parts[0]).equals(userId)) {
+            throw new OrderBusinessException(MessageConstant.CANCEL_CONFIRM_MISMATCH);
+        }
+
+//        凭证一次性，确认后立即失效
+        stringRedisTemplate.delete(key);
+
+        userCancelById(Long.valueOf(parts[1]));
+    }
+
+    /**
+     * 支付成功后将订单置为已支付待接单，重复消息直接忽略
+     */
+    @Override
+    @Transactional
+    public void markOrderPaid(Long orderId, Long userId) {
+        Orders orderDB = orderMapper.getById(orderId);
+        if (orderDB == null) {
+            return;
+        }
+//        幂等：已到待接单及之后的状态说明处理过，不重复改
+        if (orderDB.getStatus() >= Orders.TO_BE_CONFIRMED) {
+            log.info("订单已支付，跳过重复处理, orderId={}, status={}", orderId, orderDB.getStatus());
+            return;
+        }
+
+        Orders orders = Orders.builder()
+                .id(orderId)
+                .status(Orders.TO_BE_CONFIRMED)
+                .payStatus(Orders.PAID)
+                .checkoutTime(LocalDateTime.now())
+                .build();
+        orderMapper.update(orders);
+        log.info("订单已置为已支付待接单, orderId={}, userId={}", orderId, userId);
+    }
+
+    /**
+     * 支付成功后商家超时未接单则自动取消，由死信队列触发
+     */
+    @Override
+    @Transactional
+    public void cancelTimeoutOrder(Long orderId, Long userId) {
+        Orders orderDB = orderMapper.getById(orderId);
+        if (orderDB == null) {
+            return;
+        }
+//        只有仍处于待接单才说明商家未接单，已接单或已取消的直接忽略
+        if (!Orders.TO_BE_CONFIRMED.equals(orderDB.getStatus())) {
+            log.info("订单已被接单或已取消，跳过超时取消, orderId={}, status={}", orderId, orderDB.getStatus());
+            return;
+        }
+
+        Orders orders = new Orders();
+        orders.setId(orderId);
+        orders.setStatus(Orders.CANCELLED);
+        orders.setCancelReason("商家超时未接单，系统自动取消");
+        orders.setCancelTime(LocalDateTime.now());
+//        已支付订单超时取消需要退款，支付状态置为退款
+        orders.setPayStatus(Orders.REFUND);
+        orderMapper.update(orders);
+        log.info("商家超时未接单，系统自动取消订单, orderId={}, userId={}", orderId, userId);
     }
 
     /**
@@ -426,13 +580,24 @@ public class OrderServiceImpl implements OrderService {
      * @param ordersCancelDTO
      */
     @Override
+    @Transactional
     public void cancel(OrdersCancelDTO ordersCancelDTO) throws Exception {
 //        根据id查询订单
         Orders orderDB = orderMapper.getById(ordersCancelDTO.getId());
 
+//        校验订单是否存在
+        if (orderDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
+
+//      已完成(5)、已取消(6)的订单不允许再次取消
+        if (orderDB.getStatus() >= Orders.COMPLETED) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
+
 //        支付状态
         Integer payStatus = orderDB.getPayStatus();
-        if (payStatus == 1) {
+        if (payStatus == Orders.PAID) {
 //            用于已支付，需要退款
 //            String refund = weChatPayUtil.refund(
 //                    orderDB.getNumber(),
@@ -530,23 +695,18 @@ public class OrderServiceImpl implements OrderService {
 
 //        根据订单号查询当前用户的订单
         Orders orderDB = orderMapper.getByOrderIdAndUserId(orderId, userId);
+        if (orderDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
 
-//        根据订单id更新订单的状态、支付方式、支付状态、结账时间
-        Orders orders = Orders.builder()
-                .id(orderDB.getId())
-                .status(Orders.TO_BE_CONFIRMED)
-                .payStatus(Orders.PAID)
-                .checkoutTime(LocalDateTime.now())
-                .build();
-        orderMapper.update(orders);
-
-        //        通过WebSocket实现来电提醒，向客户端浏览器推送消息
-        HashMap map = new HashMap();
-        map.put("type", 1);
-        map.put("orderId", orders.getId());
-        map.put("content", "订单号：" + orders.getNumber());
-
-        webSocketServer.sendToAllClient(JSON.toJSONString(map));
+//        与 paySuccess 保持一致，跳过支付时同样只投递消息
+        publishPaySuccess(PaySuccessEvent.builder()
+                .orderId(orderDB.getId())
+                .orderNumber(orderDB.getNumber())
+                .userId(userId)
+                .amount(orderDB.getAmount())
+                .payTime(LocalDateTime.now())
+                .build());
     }
 
     /**

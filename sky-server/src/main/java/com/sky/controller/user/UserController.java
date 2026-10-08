@@ -12,7 +12,6 @@ import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -29,8 +28,6 @@ import java.util.Objects;
 @Api(tags = "C端用户相关接口")
 @Slf4j
 public class UserController {
-    @Autowired
-    public RedisTemplate redisTemplate;
 
     @Autowired
     private UserService userService;
@@ -55,9 +52,6 @@ public class UserController {
         HashMap<String, Object> claims = new HashMap<>();
         claims.put(JwtClaimsConstant.USER_ID, user.getId());
         String token = JwtUtil.createJWT(jwtProperties.getUserSecretKey(), jwtProperties.getUserTtl(), claims);
-
-        //把token存入redis中，让sky-ai能拿到进行访问，
-        redisTemplate.opsForValue().set("token",token);
 
         UserLoginVO userLoginVO = UserLoginVO.builder()
                 .id(user.getId())

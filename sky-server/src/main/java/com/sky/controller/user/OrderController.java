@@ -1,11 +1,13 @@
 package com.sky.controller.user;
 
+import com.sky.dto.OrderCancelConfirmDTO;
 import com.sky.dto.OrderStatusUpdateDTO;
 import com.sky.dto.OrdersPaymentDTO;
 import com.sky.dto.OrdersSubmitDTO;
 import com.sky.result.PageResult;
 import com.sky.result.Result;
 import com.sky.service.OrderService;
+import com.sky.vo.OrderCancelApplyVO;
 import com.sky.vo.OrderPaymentVO;
 import com.sky.vo.OrderSubmitVO;
 import com.sky.vo.OrderVO;
@@ -91,6 +93,27 @@ public class OrderController {
     @ApiOperation("用户取消订单")
     public Result cancel(@PathVariable Long id) throws Exception {
         orderService.userCancelById(id);
+        return Result.success();
+    }
+
+    /**
+     * 提交取消申请，由 AI 会话等场景调用，只签发确认凭证，不改动订单
+     */
+    @PutMapping("/cancel/apply/{id}")
+    @ApiOperation("提交取消订单申请")
+    public Result<OrderCancelApplyVO> applyCancel(@PathVariable Long id) {
+        log.info("提交取消订单申请，orderId={}", id);
+        return Result.success(orderService.applyCancel(id));
+    }
+
+    /**
+     * 用户本人确认后执行取消
+     */
+    @PostMapping("/cancel/confirm")
+    @ApiOperation("用户确认取消订单")
+    public Result confirmCancel(@RequestBody OrderCancelConfirmDTO confirmDTO) throws Exception {
+        log.info("用户确认取消订单");
+        orderService.confirmCancel(confirmDTO.getToken());
         return Result.success();
     }
 
