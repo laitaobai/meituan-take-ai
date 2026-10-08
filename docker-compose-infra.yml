@@ -1,0 +1,60 @@
+# 本地开发依赖的基础设施：MySQL + Redis + Nacos + RabbitMQ
+# 启动：docker compose -f docker-compose-infra.yml up -d
+# Nacos 控制台：http://localhost:8080 （3.x 起控制台独立端口，且不再带 /nacos 前缀）
+# RabbitMQ 控制台：http://localhost:15672 （sky / sky123456）
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: sky-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: sky_take_out
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    # 将 sky_take_out 的建表脚本放到 ./sql 目录下，首次启动会自动导入
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+      - sky-mysql-data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: sky-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass "" --appendonly no
+    restart: unless-stopped
+
+  nacos:
+    image: nacos/nacos-server:v3.2.2
+    container_name: sky-nacos
+    environment:
+      MODE: standalone
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 512m
+      JVM_XMX: 512m
+      JVM_XMN: 256m
+    ports:
+      # 8848 为客户端 server-addr 指向的主端口，9848/9849 为 gRPC 端口，必须一起暴露
+      - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+      - "8080:8080"
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: sky-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: sky
+      RABBITMQ_DEFAULT_PASS: sky123456
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: unless-stopped
+
+volumes:
+  sky-mysql-data:
