@@ -1,293 +1,238 @@
-# meituan外送后端系统 + AI助手
+# 外卖微服务系统 · AI 智能客服
 
-## 📖 项目简介
+在外卖点单业务底座之上完成的**微服务化改造**与 **AI 智能客服**集成：服务间调用由硬编码 HTTP 改为 Nacos 注册发现 + OpenFeign，支付链路用 RabbitMQ 做异步解耦，超时未接单由 TTL + 死信队列自动关单，AI 侧通过自然语言驱动真实业务写操作（取消订单、再来一单、催单、清空购物车）。
 
-> 基于本人基于同类项目**重写**的 meituan 外送后端系统，在核心业务逻辑的基础上，
-> 集成了 AI Agent 能力，支持自然语言交互完成菜品查询、智能推荐、取消订单、再来一单、催单等操作。系统保留了**正常支付**和**跳过支付**两种模式，便于开发测试与真实场景切换。
-
-
-**核心特性：**
-
-- 🤖 **AI 智能助手**：用户通过自然语言与 AI 对话，即可完成多种业务操作。
-- 🍽️ **菜品展示与推荐**：根据用户口味、预算推荐菜品，并展示菜品详情。
-- 📦 **订单管理**：支持取消订单、再来一单、催单等操作。
-- 💰 **双支付模式**：保留**正常支付**（对接微信支付）与**跳过支付**（模拟支付成功，便于测试）两种模式。
-- 🧠 **对话记忆**：多轮对话上下文保持，体验更自然。
-- 🔧 **工具调用**：AI 自主调用后端业务接口，无需人工点击。
-- 🛡️ **安全可控**：敏感操作（退款/取消）支持人工确认，防止 AI 误操作。
+仓库：<https://github.com/laitaobai/meituan-take-ai>
 
 ---
 
-## ✨ AI 功能亮点
+## 一、这个项目做了什么
 
-| 功能 | 用户示例 | AI 行为 |
-| :--- | :--- | :--- |
-| **展示菜品** | “你们有什么菜？” | 调用 `listDishes` 工具，返回菜品列表 |
-| **推荐菜品** | “我想吃辣的，预算 50 以内” | 调用 `recommendDishes` 工具，结合口味和预算推荐 |
-| **取消订单** | “帮我取消订单 123” | 调用 `cancelOrder` 工具，校验权限后取消 |
-| **再来一单** | “再来一单上次的” | 调用 `repetition` 工具，复制历史订单 |
-| **催单** | “我的订单怎么还没到？订单号 456” | 调用 `reminder` 工具，向商家发送催单提醒 |
-
-> 💡 以上所有功能均通过 AI 对话触发，底层自动调用重写后的 meituan 外送后端系统的业务接口，无需手动操作页面。
-
----
-
-## 💳 支付功能说明
-
-系统保留了两种支付模式，可根据环境灵活切换：
-
-- **正常支付**：对接微信支付，生成预支付交易单，完成真实支付流程。
-- **跳过支付**：通过 `POST /user/order/updateStatus` 接口，直接将订单状态修改为已支付，便于开发测试和演示。
+| 方向 | 改造内容 |
+| :--- | :--- |
+| 服务治理 | AI 服务对交易服务的 4 处硬编码 `http://localhost:8080` 调用，改为 Nacos 注册发现 + OpenFeign 声明式调用 |
+| 身份传递 | 移除「Redis 存全局 token」方案，改为请求级 JWT 透传，多用户严格隔离 |
+| 消息异步化 | 支付成功后广播事件，三个消费者并行处理（改状态 / 来单提醒 / 支付通知） |
+| 超时关单 | 队列级 TTL（15 分钟）+ 死信交换机，商家未接单自动取消，**不依赖延迟消息插件** |
+| 写操作安全 | 取消订单需用户本人凭一次性凭证确认后执行，AI 无法直接改单 |
+| AI 能力 | Spring AI `@Tool` 注册业务工具，RAG 检索菜品知识，SSE 流式输出 |
 
 ---
 
-## 🧱 技术栈
+## 二、技术栈
 
-**后端（重写版 meituan 外送后端系统）：**
-- Spring Boot 2.7.3
-- MyBatis-Plus
-- MySQL 8.0
-- Redis
-- JWT
-- WebSocket
-- 阿里云 OSS
+**交易服务 `sky-server`（端口 8080）**
 
-**AI 模块（sky-ai）：**
-- Spring Boot 3.3.x（独立部署）
-- Spring AI 2.0.1
-- DeepSeek / 通义千问（OpenAI 兼容接口）
-- SimpleVectorStore（RAG 检索）
-- ChatMemory（多轮对话）
-- Tool Calling（函数调用）
-- SSE 流式输出
-- RAG 优化（）
-**部署与工具：**
-- Maven
-- Docker（可选）
-- Nacos（服务发现，可选）
-- Knife4j（接口文档）
+- Spring Boot 2.7.3 · MyBatis · PageHelper · Knife4j
+- Spring Cloud 2021.0.5 · Spring Cloud Alibaba 2021.0.5.0（Nacos Discovery）
+- Spring AMQP（RabbitMQ）· Redis · MySQL 8.0 · WebSocket · JWT · 阿里云 OSS
+
+**AI 客服服务 `sky-ai-chat`（端口 9090，独立工程）**
+
+- Spring Boot 4.1.1 · Spring AI 2.0.1 · Spring Cloud 2025.1.3 · Spring Cloud Alibaba 2025.1.0.0
+- OpenFeign · SimpleVectorStore（RAG）· MessageWindowChatMemory · WebFlux SSE
+
+> 两个服务的 Spring Boot 大版本不同（2.7 与 4.1），因此各自对接对应版本的 Spring Cloud Alibaba，注册到同一个 Nacos 3.x。Nacos 服务端同时兼容 2.x 与 3.x 客户端，这是避免全量升级的折中方案。
+
+**基础设施（Docker Compose 一键启动）**
+
+- Nacos 3.2.2 · RabbitMQ 3.13 · Redis 7 · MySQL 8.0
 
 ---
 
-## 🏗️ 系统架构
+## 三、系统架构
 
-```
-┌─────────────┐     HTTP      ┌─────────────────────┐
-│   前端/小程序 │ ────────────> │ meituan外送后端系统   │
-└─────────────┘               │ （重写版）Port: 8080 │
-                              └─────────────────────┘
-                                      ↑
-                                      │ HTTP + Token
-                                      │
-                              ┌─────────────────────┐
-                              │      sky-ai          │
-                              │   (AI 智能助手)       │
-                              │      Port: 9090      │
-                              └─────────────────────┘
-                                      ↑
-                                      │ 自然语言
-                                      │
-                              ┌─────────────────────┐
-                              │    用户/客户端        │
-                              └─────────────────────┘
+```mermaid
+flowchart LR
+    U[用户端 / 管理端] -->|HTTP + JWT| S[sky-server :8080]
+    U -->|HTTP + JWT| A[sky-ai-chat :9090]
+    A -.->|OpenFeign| S
+    N[Nacos 3.x] -.->|注册发现| S
+    N -.->|注册发现| A
+    S -->|支付成功事件| Q[RabbitMQ]
+    Q --> C1[改订单状态]
+    Q --> C2[来单提醒]
+    Q --> C3[支付通知]
 ```
 
-- 重写后的 meituan 外送后端系统提供所有业务接口（菜品、订单、用户等）。
-- `sky-ai` 独立启动，通过 HTTP 调用原业务系统的接口，并借助大模型实现智能交互。
-- 两者通过 JWT Token 进行安全认证，`sky-ai` 自动登录获取并缓存 Token。
+- `sky-server` 提供全部业务接口（菜品、套餐、购物车、订单、营业额统计等）。
+- `sky-ai-chat` 独立部署，通过 OpenFeign 调用交易服务，本身不直连数据库。
+- 两侧都注册到 Nacos，调用方按服务名寻址，无硬编码地址。
 
 ---
 
-## 🖥️ 环境要求
+## 四、支付成功后的消息链路
 
-- JDK 17+
-- Maven 3.8+
-- MySQL 8.0+
-- Redis 7.0+
-- （可选）Docker Desktop
-- 大模型 API Key（如 DeepSeek、通义千问）
+支付接口只做校验与投递即返回，**不阻塞在数据库写入和推送上**：
+
+```mermaid
+flowchart LR
+    P[支付成功] --> E[fanout 交换机]
+    E --> C1[消费者一 改订单状态]
+    E --> C2[消费者二 来单提醒]
+    E --> C3[消费者三 支付通知]
+    C1 --> T[TTL 队列 无消费者]
+    T -.->|15 分钟到期| D[死信交换机 / 队列]
+    D --> C4[消费者四 未接单自动取消]
+```
+
+关键设计：
+
+- **事务一致性**：用 `TransactionSynchronizationManager.afterCommit` 保证支付事务提交后才发消息，避免事务回滚但消息已投递。
+- **消费幂等**：Redis SETNX 按「消费者 + 订单号」标记，重复投递不会重复处理；手动 ACK，失败重投。
+- **超时关单不装插件**：TTL 队列不注册任何消费者，消息到期后由 RabbitMQ 自动投递到死信交换机。消费者按订单当前状态判断，已接单或已取消的订单直接忽略，并置支付状态为退款。
 
 ---
 
-## 🚀 快速开始
+## 五、取消订单为什么需要用户确认
 
-### 1. 克隆项目
+用户在对话里随口一句「帮我取消订单」不应直接改库。因此 AI 侧只能**提交申请**，真正执行必须由用户本人完成：
+
+```mermaid
+flowchart LR
+    A[对话提出取消] --> B[后端签发一次性凭证]
+    B --> C[前端弹确认卡片]
+    C -->|用户点击确认| D[校验并执行取消]
+    C -->|不确认 / 超时| E[订单保持原状]
+```
+
+- 凭证存 Redis，**5 分钟有效期，用后即删**。
+- 校验订单归属与状态机：不是本人的订单、已完成 / 已取消的订单一律拒绝。
+- AI 服务的 Feign 客户端**不声明直接取消的方法**，从编译期杜绝绕过。
+- 用户在订单页手动取消仍然即时生效，只有 AI 路径强制二次确认。
+
+---
+
+## 六、目录结构
+
+```
+.
+├── sky-common        # 公共模块：常量、异常、工具类、JWT、OSS、结果封装
+├── sky-pojo          # 实体、DTO、VO
+├── sky-server        # 交易服务（端口 8080）
+│   └── com.sky
+│       ├── controller    # admin / user / notify 三类接口
+│       ├── service       # 订单、菜品、套餐、购物车等业务
+│       ├── mapper        # MyBatis 接口与 XML
+│       ├── mq            # RabbitMQ 配置、生产者、四个消费者
+│       ├── config        # Redis / WebSocket / WebMvc
+│       ├── interceptor   # JWT 拦截器
+│       └── websocket     # 来单提醒与定向推送
+├── sky-ai-chat       # AI 客服服务（端口 9090，独立工程，不在父 POM 的 modules 中）
+│   └── com.sky.taobai
+│       ├── controller    # /chat（SSE）、/pending-action
+│       ├── Service       # @Tool 工具定义与业务调用
+│       ├── client        # OpenFeign 客户端
+│       └── context       # 待确认动作存储
+├── docker-compose-infra.yml   # MySQL / Redis / Nacos / RabbitMQ
+└── pom.xml
+```
+
+---
+
+## 七、快速开始
+
+### 1. 启动基础设施
 
 ```bash
-git clone https://github.com/laitaobai/meituan-take-ai.git
-cd meituan-take-ai
+docker compose -f docker-compose-infra.yml up -d
 ```
+
+| 服务 | 地址 | 说明 |
+| :--- | :--- | :--- |
+| Nacos | <http://localhost:8080> | 3.x 起控制台独立端口，且不再带 `/nacos` 前缀 |
+| RabbitMQ | <http://localhost:15672> | 账号 `sky` / `sky123456` |
+| MySQL | localhost:3306 | 库 `sky_take_out`，root / 123456 |
+| Redis | localhost:6379 | 无密码，db 10 |
 
 ### 2. 初始化数据库
 
-- 创建数据库 `sky_take_out`。
-- 导入项目提供的 SQL 脚本（`sky-server/src/main/resources/db` 目录下）。
+创建 `sky_take_out` 库并导入建表脚本。仓库**未附带 SQL 脚本**，可把脚本放到仓库根目录的 `sql/` 下，Compose 会在 MySQL 首次启动时自动导入。
 
-### 3. 配置重写后的业务系统
+### 3. 配置交易服务
 
-修改 `sky-server/src/main/resources/application-dev.yml`：
+编辑 `sky-server/src/main/resources/application-dev.yml`：数据源、Redis、阿里云 OSS、微信支付（可选）。密钥建议走环境变量，不要硬编码。
 
-```yaml
-sky:
-  datasource:
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    host: localhost
-    port: 3306
-    database: sky_take_out
-    username: root
-    password: 你的密码
-  redis:
-    host: localhost
-    port: 6379
-    database: 0
-  alioss:
-    endpoint: oss-cn-xxx.aliyuncs.com
-    access-key-id: ${ALIYUN_ACCESS_KEY_ID}
-    access-key-secret: ${ALIYUN_ACCESS_KEY_SECRET}
-    bucket-name: your-bucket
-```
-
-> 建议将密钥配置为环境变量，不要硬编码在代码中。
-
-### 4. 启动业务系统
-
-运行 `SkyApplication` 主类，端口 `8080`。
-
-### 5. 配置 sky-ai
-
-修改 `sky-ai/src/main/resources/application.yml`：
-
-```yaml
-server:
-  port: 9090
-
-spring:
-  ai:
-    openai:
-      api-key: ${DEEPSEEK_API_KEY}
-      base-url: https://api.deepseek.com/v1
-      chat:
-        options:
-          model: deepseek-chat
-
-sky:
-  server:
-    base-url: http://localhost:8080
-    username: admin      # 业务系统管理员账号
-    password: 123456     # 业务系统管理员密码
-  ai:
-    enabled: true
-```
-
-### 6. 启动 sky-ai
-
-运行 `SkyAiApplication` 主类，端口 `9090`。
-
-### 7. 测试 AI 对话
+### 4. 配置 AI 服务
 
 ```bash
-curl "http://localhost:9090/ai/chat?message=我想吃辣的，预算50以内"
+set DASHSCOPE_API_KEY=你的大模型密钥
 ```
 
-AI 将自动调用菜品查询、推荐等工具，并返回自然语言结果。
+`sky-ai-chat/src/main/resources/application.yaml` 中模型走 OpenAI 兼容接口，默认是通义千问 `qwen3.8-max` 与 `text-embedding-v4`，可自行替换 `base-url` 与模型名。
 
----
+### 5. 启动
 
-## 📡 AI 功能使用说明
-
-### 对话接口
-
-```
-GET /ai/chat?message={用户消息}
+```bash
+mvn -B -DskipTests compile        # 父工程（sky-common / sky-pojo / sky-server）
+cd sky-ai-chat && mvn -B -DskipTests compile   # AI 服务单独构建
 ```
 
-支持 **SSE 流式输出**，前端可逐字显示。
+分别运行 `SkyApplication`（8080）与 `SkyAiChatApplication`（9090）。
 
-### 功能示例
+### 6. 验证 AI 对话
 
-#### 1. 展示菜品
-
-**用户**：你们有什么菜？  
-**AI**：调用 `listDishes`，返回：“我们目前有：老坛酸菜鱼、剁椒鱼头、清炒小油菜……”
-
-#### 2. 推荐菜品
-
-**用户**：我想吃辣的，预算 50 以内。  
-**AI**：调用 `recommendDishes(taste="辣", budget=50.0)`，返回：“为您推荐：麻婆豆腐（18元）、水煮肉片（38元），总价 56 元，略超预算，可以换成……”
-
-#### 3. 取消订单
-
-**用户**：帮我取消订单 123。  
-**AI**：调用 `cancelOrder(orderId=123)`，先校验权限，若订单状态允许取消，则返回：“订单 123 已成功取消。”
-
-#### 4. 再来一单
-
-**用户**：再来一单上次的。  
-**AI**：调用 `repetition(orderId=xxx)`，复制历史订单并返回：“已为您重新下单，订单号 789。”
-
-#### 5. 催单
-
-**用户**：我的订单怎么还没到？订单号 456。  
-**AI**：调用 `reminder(orderId=456)`，返回：“已为您催单，商家会尽快处理。”
-
-> 所有操作均通过 Tool Calling 自动完成，无需手动点击。
-
----
-
-## 📁 项目结构
-
-```
-meituan-take-ai
-├── sky-common          # 公共模块（工具类、常量、异常等）
-├── sky-pojo            # 实体类、DTO、VO
-├── sky-server          # 重写版 meituan 外送后端系统（端口 8080）
-│   ├── src/main/java/com/sky
-│   │   ├── controller
-│   │   ├── service
-│   │   ├── mapper
-│   │   └── ...
-│   └── src/main/resources
-│       ├── application-dev.yml
-│       └── mapper
-├── sky-ai              # AI 智能助手模块（端口 9090）
-│   ├── src/main/java/com/sky/taobai
-│   │   ├── controller  # AI 对话接口
-│   │   ├── service     # Tool 实现、Token 管理
-│   │   ├── config      # RestTemplate、ChatClient 配置
-│   │   └── ...
-│   └── src/main/resources
-│       ├── application.yml
-│       └── file/prompt.st   # 系统提示词
-└── pom.xml             # 父 POM
+```bash
+curl -N --header "authentication: {用户登录后拿到的 JWT}" ^
+     "http://localhost:9090/chat?msg=帮我取消订单 123"
 ```
 
----
+**前端接入要点**：
 
-## 🤝 贡献指南
-
-欢迎提交 Issue 或 Pull Request。
-
-1. Fork 本仓库
-2. 新建分支 `feature/xxx`
-3. 提交代码
-4. 发起 Pull Request
+1. 调 `/chat` 时带上 `authentication` 请求头（JWT），否则 AI 侧无身份，业务调用会返回 401。
+2. 对话结束后拉 `GET /pending-action`，若返回内容则弹确认卡片。
+3. 用户确认后调 `POST /user/order/cancel/confirm`（body 为 `{ "token": "..." }`），随后 `DELETE /pending-action` 清除。
+4. WebSocket 需以 **userId 作为 sid** 连接（`ws://host/ws/{userId}`），否则收不到定向的支付成功通知。
 
 ---
 
-## 📄 开源协议
+## 八、主要接口
 
-本项目基于 [MIT License](LICENSE) 开源，可自由使用、修改、分发。
+| 分类 | 方法 | 路径 | 说明 |
+| :--- | :--- | :--- | :--- |
+| 用户 | POST | `/user/user/login` | 微信登录，返回 JWT |
+| 用户 | POST | `/user/order/submit` | 提交订单 |
+| 用户 | PUT | `/user/order/payment` | 订单支付 |
+| 用户 | POST | `/user/order/updateStatus` | 跳过支付，直接置为已支付 |
+| 用户 | PUT | `/user/order/cancel/{id}` | 用户手动取消（即时生效） |
+| 用户 | PUT | `/user/order/cancel/apply/{id}` | 提交取消申请，返回一次性凭证 |
+| 用户 | POST | `/user/order/cancel/confirm` | 用户确认后执行取消 |
+| 用户 | POST | `/user/order/repetition/{id}` | 再来一单 |
+| 用户 | GET | `/user/order/reminder/{id}` | 催单 |
+| 管理端 | PUT | `/admin/order/confirm` | 接单 |
+| 管理端 | PUT | `/admin/order/rejection` | 拒单 |
+| 管理端 | PUT | `/admin/order/delivery/{id}` | 派送 |
+| 管理端 | PUT | `/admin/order/complete/{id}` | 完成 |
+| AI | GET | `/chat?msg=` | SSE 流式对话 |
+| AI | GET / DELETE | `/pending-action` | 查询 / 清除待确认动作 |
+
+接口文档：`http://localhost:8080/doc.html`（Knife4j）。
 
 ---
 
-## 🙏 致谢
+## 九、测试
 
-- 感谢原 meituan 外送系统提供的业务参考。
-- 感谢 [Spring AI](https://spring.io/projects/spring-ai) 提供的 AI 集成能力。
-- 感谢 DeepSeek / 通义千问 提供的大模型服务。
+```bash
+mvn -pl sky-server -am test -Dtest='OrderServiceImplTest,OrderMessageConsumerTest'
+cd sky-ai-chat && mvn test -Dtest='JwtTest,PendingActionStoreTest,UserAiServiceImplTest'
+```
+
+> 注意：`-am` 不能省略。单独构建 `sky-server` 会引用本地仓库里过旧的 `sky-pojo` 包而编译失败。
+
+29 个用例覆盖：取消申请不改订单、凭证一次性、越权与状态校验、消费幂等、四个消费者分发、超时取消只处理待接单订单等。
 
 ---
 
-> **重写系统 + AI 赋能，让点外卖也能对话。**  
-> 如果这个项目对你有帮助，欢迎点个 ⭐ Star 支持一下！
-> --致歉：该项目还有甚多可以优化的点，大家可以自行修改完善------
+## 十、已知限制
+
+- AI 服务的接口（含 `/chat`）目前**没有鉴权**，仅靠下游交易服务的 JWT 校验兜底，生产环境需要补。
+- `PendingActionStore` 是单实例内存实现，AI 服务多实例部署时需换成 Redis。
+- 支付接口为纯异步，若 MQ 与消费者同时不可用，订单会停留在待付款状态；需要同步兜底可再加降级分支。
+- TTL 时长（15 分钟）是编译期常量 `RabbitMQConfig.ACCEPT_TIMEOUT_MILLIS`，调整后需删除队列才会重新声明生效。
+- 微信支付相关代码保留但未启用，实际走「跳过支付」路径。
+
+---
+
+## 十一、开源协议
+
+MIT License。业务底座参考自苍穹外卖开源教学项目，AI 与微服务改造部分为个人实现。
